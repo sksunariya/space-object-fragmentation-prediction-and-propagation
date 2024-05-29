@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CesiumJS Multiple Objects Simulation with Gravity</title>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.87/Build/Cesium/Cesium.js"></script>
+    <style>
+        @import url('https://cesium.com/downloads/cesiumjs/releases/1.87/Build/Cesium/Widgets/widgets.css');
+        #cesiumContainer {
+            width: 100%;
+            height: 100vh;
+            margin: 0;
+            padding: 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="cesiumContainer"></div>
+    <script>
+
+
+// let fragementArray = [];
+
+let fragments = [];
+async function fetchFragments (){
+    let fragementArray = [];
+    try {
+
+        axios({
+            method: 'get',
+            url: 'http://localhost:4000/',
+        })
+            .then(async function (response) {
+                console.log()
+                fragments = await response.data.data;
+                fragementArray = fragments;
+                console.log("fragments received: ", fragments);
+                
+                    // let pos = {
+                    //     x: fragment.position[0],
+                    //     y: fragment.position[1],
+                    //     z: fragment.position[2]
+                    // }
+                    // let vel = {
+                    //     x: fragment.velocity[0],
+                    //     y: fragment.velocity[1],
+                    //     z: fragment.velocity[2]
+                    // }
+                    // let areaOfFragment = Math.PI * Math.pow(fragment.diameter / 2, 2);
+                    // let massOfFragment = fragment.mass;
+                    propagateFragment(fragementArray);
+                
+            } );
+
+        
+    } catch (error) {
+        console.log("Error in fetch fragment data. ", error);
+    }
+}
+
+fetchFragments();
+
+
+
+function propagateFragment(fragments){
+       // Initialize Cesium Viewer
+       const viewer = new Cesium.Viewer('cesiumContainer', {
+            imageryProvider: new Cesium.TileMapServiceImageryProvider({
+                url: Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"),
+            }),
+            baseLayerPicker: false, geocoder: false, homeButton: false, infoBox: false,
+            navigationHelpButton: false, sceneModePicker: false
+        });
+
+        // Define constants
+        const G = 6.67430e-11; // Gravitational constant in m^3 kg^-1 s^-2
+        const Cd = 2.2; // Drag coefficient
+        const A = 10; // Cross-sectional area in square meters
+        const m = 1000; // Mass in kilograms
+        const solarPressure = 4.57e-6; // Solar radiation pressure in N/m^2
+        const deltaTime = 1; // Time step in seconds
+
+        // Masses of celestial bodies
+        const earthMass = 5.972e24; // Mass of Earth in kg
+        const moonMass = 7.34767309e22; // Mass of Moon in kg
+        const sunMass = 1.989e30; // Mass of Sun in kg
+
+        // Function to compute atmospheric density based on altitude
+        function computeAtmosphericDensity(altitude) {
+            // Simplified model of atmospheric density decreasing exponentially with altitude
+            const seaLevelDensity = 1.225; // kg/m^3 at sea level
+            const scaleHeight = 8500; // meters
+            return seaLevelDensity * Math.exp(-altitude / scaleHeight);
+        }
+
+
+        let objects = [];
+        fragments.forEach(fragment => {
+            let fragmentDetails = {
+                position: Cesium.Cartesian3.fromDegrees(-75.09, 40, 400000.0), // POSITION OF FRAGMENTATION
+                // position: Cesium.Cartesian3.fromDegrees(fragment.positionGeodetic.longitude, fragment.positionGeodetic.latitude, fragment.positionGeodetic.height),
+                velocity: new Cesium.Cartesian3(fragment.velocity[0], fragment.velocity[1], fragment.velocity[2]),
+                mass: fragment.mass,
+                diameter: fragment.diameter
+            };
+            objects.push(fragmentDetails);
+        })
+
+        // Function to compute gravitational force
+        function computeGravitationalForce(fragmentPosition, bodyPosition, bodyMass, fragmentMass) {
+            const direction = Cesium.Cartesian3.subtract(bodyPosition, fragmentPosition, new Cesium.Cartesian3());
+            const distanceSquared = Cesium.Cartesian3.magnitudeSquared(direction);
+            const forceMagnitude = G * fragmentMass * bodyMass / distanceSquared;
+            const force = Cesium.Cartesian3.multiplyByScalar(Cesium.Cartesian3.normalize(direction, new Cesium.Cartesian3()), forceMagnitude, new Cesium.Cartesian3());
+            return force;
+        }
+
+        // Function to compute forces
+        function computeForces(position, velocity, moonPosition, sunPosition, fragmentMass, fragmentDiameter) {
+            const fragmentArea = Math.PI * Math.pow(fragmentDiameter/2, 2);
+            // Atmospheric drag
+            const altitude = Cesium.Cartesian3.magnitude(position) - 6378137.0; // Approximate altitude above Earth's surface
+            const atmosphericDensity = computeAtmosphericDensity(altitude);
+            const speed = Cesium.Cartesian3.magnitude(velocity);
+            const dragForce = Cesium.Cartesian3.multiplyByScalar(velocity, -0.5 * atmosphericDensity * speed  * Cd * fragmentArea, new Cesium.Cartesian3());
+
+            // Solar radiation pressure
+            const solarForce = new Cesium.Cartesian3(0.0, 0.0, -solarPressure * A/m ); // CAN BE IMPROVED
+
+            // Gravitational forces
+            const earthGravity = computeGravitationalForce(position, Cesium.Cartesian3.ZERO, earthMass, fragmentMass);
+            const moonGravity = computeGravitationalForce(position, moonPosition, moonMass, fragmentMass);
+            const sunGravity = computeGravitationalForce(position, sunPosition, sunMass, fragmentMass);
+
+            // Total force
+            const totalForce = new Cesium.Cartesian3();
+            Cesium.Cartesian3.add(dragForce, solarForce, totalForce);
+            Cesium.Cartesian3.add(totalForce, earthGravity, totalForce);
+            Cesium.Cartesian3.add(totalForce, moonGravity, totalForce);
+            Cesium.Cartesian3.add(totalForce, sunGravity, totalForce);
+            return totalForce;
+        }
+
+        // Function to update position and velocity
+        function updatePositionAndVelocity(position, velocity, deltaTime, moonPosition, sunPosition, fragmentMass, fragmentDiameter) {
+            const forces = computeForces(position, velocity, moonPosition, sunPosition, fragmentMass, fragmentDiameter);
+            const acceleration = Cesium.Cartesian3.divideByScalar(forces, fragmentMass, new Cesium.Cartesian3());
+
+            // Update velocity
+            Cesium.Cartesian3.add(velocity, Cesium.Cartesian3.multiplyByScalar(acceleration, deltaTime, new Cesium.Cartesian3()), velocity);
+
+            // Update position
+            Cesium.Cartesian3.add(position, Cesium.Cartesian3.multiplyByScalar(velocity, deltaTime, new Cesium.Cartesian3()), position);
+            // console.log("velocity: ", velocity);
+        }
+
+        // Create dynamic entities for each object
+        objects.forEach((obj, index) => {
+            const positionProperty = new Cesium.SampledPositionProperty();
+            const entity = viewer.entities.add({
+                position: positionProperty,
+                point: {
+                    pixelSize: 4,
+                    color: Cesium.Color.WHITE
+                },
+                path: {
+                    show: true,
+                    leadTime: 0,
+                    trailTime: 300,
+                    width: 2,
+                    material: new Cesium.PolylineGlowMaterialProperty({
+                        glowPower: 0.2,
+                        color: Cesium.Color.YELLOW
+                    })
+                }
+            });
+
+            obj.positionProperty = positionProperty;
+            obj.entity = entity;
+        });
+
+        // Set the simulation time range
+        const startTime = Cesium.JulianDate.now();
+        const endTime = Cesium.JulianDate.addSeconds(startTime, 3600*24*30, new Cesium.JulianDate()); // 1 hour simulation
+        viewer.clock.startTime = startTime;
+        viewer.clock.stopTime = endTime;
+        viewer.clock.currentTime = startTime;
+        viewer.clock.clockRange = Cesium.ClockRange.LOOP_STOP;
+        viewer.clock.multiplier = 1; 
+
+        // Zoom to the entities
+        // viewer.trackedEntity = objects[0].entity; // Track the first entity initially
+
+        // Simulation loop
+        viewer.clock.onTick.addEventListener(function(clock) {
+            const currentTime = clock.currentTime;
+            const moonPosition = Cesium.Simon1994PlanetaryPositions.computeMoonPositionInEarthInertialFrame(currentTime);
+            const sunPosition = Cesium.Simon1994PlanetaryPositions.computeSunPositionInEarthInertialFrame(currentTime);
+
+            objects.forEach((obj, index) => {
+                updatePositionAndVelocity(obj.position, obj.velocity, deltaTime, moonPosition, sunPosition, obj.mass, obj.diameter);
+                obj.positionProperty.addSample(currentTime, Cesium.Cartesian3.clone(obj.position));
+
+                // Change color if the object is entering the atmosphere
+                const altitude = Cesium.Cartesian3.magnitude(obj.position) - 6378137.0;
+                if (altitude < 120000.0) { // Start glowing below 120 km
+                    obj.entity.point.color = Cesium.Color.RED;
+                    
+                    if (!obj.reEntryLocation) {
+                        let cartographic = Cesium.Cartographic.fromCartesian(obj.position);
+                        obj.reEntryLocation = {
+                            longitude : Cesium.Math.toDegrees(cartographic.longitude),
+                            latitude : Cesium.Math.toDegrees(cartographic.latitude),
+                            height : cartographic.height
+                        }
+                        obj.reEntryTime = currentTime;
+                        console.log(`Re-Entry: ${index+1}th fragment entered the earth atmosphere from  long: ${obj.reEntryLocation.longitude}, lat: ${obj.reEntryLocation.latitude}, height: ${obj.reEntryLocation.height}`)
+                    }
+                    if (altitude <= 0 && !obj.groundTouchLocation){
+                        let cartographic = Cesium.Cartographic.fromCartesian(obj.position);
+                        obj.groundTouchLocation = {
+                            longitude : Cesium.Math.toDegrees(cartographic.longitude),
+                            latitude : Cesium.Math.toDegrees(cartographic.latitude),
+                            height : cartographic.height
+                        }
+                        obj.groundTouchTime = currentTime;
+                        console.log(`Ground Touch: ${index+1}th fragment touched the ground at location long: ${obj.groundTouchLocation.longitude}, lat: ${obj.groundTouchLocation.latitude}`)
+                        
+                    }
+                } else {
+                    obj.entity.point.color = Cesium.Color.GREEN;
+                }
+
+                
+            });
+        });
+    }
+
+    </script>
+    
+</body>
+</html>
